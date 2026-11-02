@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/lib/util.sh"
+set_log_context relay-doctor preflight
+
+usage() {
+  cat <<'EOF'
+Non-mutating intermediary preflight:
+  mb-migrator relay-doctor USER@SOURCE --destination=USER@TARGET \
+    --source-root=/sites/example --target-root=/srv/htdocs [options]
+  --source-port=22 --destination-port=22
+  --source-identity=PATH --destination-identity=PATH
+  --source-known-hosts=PATH --destination-known-hosts=PATH
+  --source-db-method=auto|wp-cli|native
+  --json                      Emit one structured result on stdout
+EOF
+}
+
+json_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/\\r}"
+  value="${value//$'\t'/\\t}"
+  printf '%s' "$value"
+}
+
+emit_result() {
+  local status="$1" reason="$2" message="$3" source_wp="${4:-unknown}" source_rsync="${5:-unknown}"
+  local target_wp="${6:-unknown}" available_kb="${7:-0}" destination_content="${8:-unknown}" source_files_kb="${9:-0}"
+  if [[ "$json" == yes ]]; then
+    printf '{"schema_version":1,"tool_version":"%s","status":"%s","reason_code":%s,"message":"%s","source":{"wp_cli":"%s","rsync":"%s","files_kb":%s},"destination":{"wordpress":"%s","content_state":"%s","rsync":"available","available_kb":%s}}\n' \
+      "$(json_escape "$(<"$ROOT_DIR/VERSION")")" \
+      "$(json_escape "$status")" \
+      "$([[ -z "$reason" ]] && printf null || printf '"%s"' "$(json_escape "$reason")")" \
+      "$(json_escape "$message")" \
+      "$(json_escape "$source_wp")" \
+      "$(json_escape "$source_rsync")" \
+      "$source_files_kb" \
+      "$(json_escape "$target_wp")" \
+      "$(json_escape "$destination_content")" \
+      "$available_kb"
+  else
+    if [[ "$status" == ready ]]; then log "$message"; else warn "$message"; fi
+  fi
+}
+
+if [[ "${1:-}" == --help || $# -eq 0 ]]; then usage; exit 0; fi
+source_host="$1"; shift
+destination=""; source_root=""; target_root=""; source_port=22; destination_port=22
+source_identity=""; destination_identity=""; source_known_hosts=""; destination_known_hosts=""
+method=auto; json=no
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --destination=*) destination="${1#*=}" ;;
+    --source-root=*) source_root="${1#*=}" ;;
+    --target-root=*) target_root="${1#*=}" ;;
+    --source-port=*) source_port="${1#*=}" ;;
+    --destination-port=*) destination_port="${1#*=}" ;;
+    --source-identity=*) source_identity="${1#*=}" ;;
+    --destination-identity=*) destination_identity="${1#*=}" ;;
+    --source-known-hosts=*) source_known_hosts="${1#*=}" ;;
+    --destination-known-hosts=*) destination_known_hosts="${1#*=}" ;;
+    --source-db-method=*) method="${1#*=}" ;;
+    --json) json=yes ;;
+    *) emit_result blocked migration.preflight_invalid "Unknown relay preflight option."; exit 2 ;;
+  esac
+  shift
+done
+
+for host in "$source_host" "$destination"; do
+  if [[ ! "$host" =~ ^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+$ ]]; then
+    emit_result blocked migration.preflight_invalid "Expected USER@HOST for both SSH endpoints."; exit 2
+  fi
+done
+for path in "$source_root" "$target_root"; do
+  if [[ ! "$path" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+    emit_result blocked migration.preflight_invalid "Both document roots must be absolute paths without shell characters."; exit 2
+  fi
+done
+for port in "$source_port" "$destination_port"; do
+  if [[ ! "$port" =~ ^[0-9]+$ || "$port" -le 0 || "$port" -gt 65535 ]]; then
+    emit_result blocked migration.preflight_invalid "Invalid SSH port."; exit 2
+  fi
+done
+case "$method" in auto|wp-cli|native) ;; *) emit_result blocked migration.preflight_invalid "Invalid source database method."; exit 2 ;; esac
+
+for path in "$source_identity" "$destination_identity" "$source_known_hosts" "$destination_known_hosts"; do
+  if [[ -n "$path" && ( ! -f "$path" || -L "$path" ) ]]; then
+    emit_result blocked migration.preflight_invalid "A required SSH identity or known-hosts file is unavailable."; exit 2
+  fi
+done
+
+source_ssh=(-p "$source_port" -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=8)
+dest_ssh=(-p "$destination_port" -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=8)
+[[ -z "$source_identity" ]] || source_ssh+=(-i "$source_identity" -o IdentitiesOnly=yes -o IdentityAgent=none)
+[[ -z "$destination_identity" ]] || dest_ssh+=(-i "$destination_identity" -o IdentitiesOnly=yes -o IdentityAgent=none)
+[[ -z "$source_known_hosts" ]] || source_ssh+=(-o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$source_known_hosts")
+[[ -z "$destination_known_hosts" ]] || dest_ssh+=(-o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$destination_known_hosts")
+
+source_output=""
+if ! source_output="$(ssh "${source_ssh[@]}" "$source_host" bash -s -- preflight "$source_root" "$method" < "$ROOT_DIR/lib/remote-source.sh" 2>/dev/null)"; then
+  emit_result blocked migration.source_preflight_failed "Source WordPress preflight failed. Check source access, document root, database export capability, and multisite status."
+  exit 1
+fi
+target_output=""
+if ! target_output="$(ssh "${dest_ssh[@]}" "$destination" bash -s -- "$target_root" < "$ROOT_DIR/lib/remote-target.sh" 2>/dev/null)"; then
+  emit_result blocked migration.destination_preflight_failed "Destination preflight failed. Check MightyBox SSH access, target root, tools, permissions, and capacity."
+  exit 1
+fi
+
+value_for() { printf '%s\n' "$1" | awk -F= -v key="$2" '$1 == key {sub(/^[^=]*=/, ""); print; exit}'; }
+source_wp="$(value_for "$source_output" wp_cli)"
+source_rsync="$(value_for "$source_output" rsync)"
+source_files_kb="$(value_for "$source_output" files_kb)"
+target_wp="$(value_for "$target_output" wp_state)"
+target_content="$(value_for "$target_output" content_state)"
+available_kb="$(value_for "$target_output" available_kb)"
+[[ "$available_kb" =~ ^[0-9]+$ ]] || available_kb=0
+[[ "$source_files_kb" =~ ^[0-9]+$ ]] || source_files_kb=0
+
+if [[ "$target_wp" != installed ]]; then
+  emit_result blocked migration.destination_wordpress_unavailable "The destination does not have a usable WordPress installation." "$source_wp" "$source_rsync" "$target_wp" "$available_kb" "$target_content" "$source_files_kb"
+  exit 1
+fi
+if [[ "$target_content" != clean ]]; then
+  emit_result blocked migration.destination_not_fresh "The destination contains user content or media. Create a fresh Standard site and try again." "$source_wp" "$source_rsync" "$target_wp" "$available_kb" "$target_content" "$source_files_kb"
+  exit 1
+fi
+required_kb=$((source_files_kb * 2 + 524288))
+if [[ "$source_files_kb" -eq 0 || "$available_kb" -lt "$required_kb" ]]; then
+  emit_result blocked migration.destination_capacity_insufficient "The destination does not have the conservative free-space budget required for transfer and rollback." "$source_wp" "$source_rsync" "$target_wp" "$available_kb" "$target_content" "$source_files_kb"
+  exit 1
+fi
+
+emit_result ready "" "Source and destination compatibility preflight passed." "$source_wp" "$source_rsync" "$target_wp" "$available_kb" "$target_content" "$source_files_kb"

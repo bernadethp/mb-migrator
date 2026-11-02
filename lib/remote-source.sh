@@ -244,6 +244,9 @@ case "$command_name" in
     printf 'source_config=%s\n' "$source_config"
     printf 'wp_cli=%s\n' "$(command -v wp 2>/dev/null || printf unavailable)"
     printf 'rsync=%s\n' "$(command -v rsync 2>/dev/null || printf unavailable)"
+    files_kb="$(du -sk "$source_root" 2>/dev/null | awk 'NR == 1 {print $1}')"
+    [[ "$files_kb" =~ ^[0-9]+$ ]] || fail "source file size could not be measured"
+    printf 'files_kb=%s\n' "$files_kb"
     ;;
   export-db) export_database ;;
   get-url) get_source_url ;;

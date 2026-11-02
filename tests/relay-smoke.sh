@@ -5,6 +5,10 @@ T="$(mktemp -d "${TMPDIR:-/tmp}/mb-relay-test.XXXXXX")"
 trap 'status=$?; if [[ "$status" -ne 0 ]]; then cat "$T/"*.log >&2; fi; rm -rf "$T"' EXIT
 export RELAY_TEST_ROOT="$T"
 mkdir -p "$T/source/wp-content/uploads" "$T/target/wp-content" "$T/bin" "$T/home"
+printf 'test-key\n' > "$T/source-key"
+printf 'test-key\n' > "$T/destination-key"
+printf 'source host key\n' > "$T/source-known-hosts"
+printf 'destination host key\n' > "$T/destination-known-hosts"
 printf '<?php\n' > "$T/source/wp-config.php"
 printf '<?php\n' > "$T/target/wp-config.php"
 printf first > "$T/source/wp-content/uploads/test.txt"
@@ -14,6 +18,9 @@ cat > "$T/bin/wp" <<'WP'
 set -eu
 case "$*" in
   *'core is-installed --network'*) exit 1 ;;
+  *'core is-installed'*) exit 0 ;;
+  *'post list '*--format=count*) [[ "${RELAY_TARGET_MODIFIED:-0}" == 1 ]] && echo 4 || echo 2 ;;
+  *'user list --format=count'*) echo 1 ;;
   *'db query SELECT 1'*) echo 1 ;;
   *'db export '*)
     [[ "${RELAY_FAIL_DATABASE:-0}" != 1 ]] || exit 77
@@ -63,9 +70,31 @@ RSYNC
 chmod +x "$T/bin/"*
 export RELAY_REAL_RSYNC="$REAL_RSYNC"
 export PATH="$T/bin:$PATH"
+version_output="$("$ROOT_DIR/bin/mb-migrator" --version)"
+[[ "$version_output" == "mb-migrator $(<"$ROOT_DIR/VERSION")" ]]
+doctor_output="$("$ROOT_DIR/bin/mb-migrator" relay-doctor source@test \
+  --destination=dest@test --source-root="$T/source" --target-root="$T/target" \
+  --source-identity="$T/source-key" --destination-identity="$T/destination-key" \
+  --source-known-hosts="$T/source-known-hosts" --destination-known-hosts="$T/destination-known-hosts" \
+  --json)"
+grep -q '"status":"ready"' <<< "$doctor_output"
+grep -q '"schema_version":1' <<< "$doctor_output"
+grep -q '"content_state":"clean"' <<< "$doctor_output"
+test ! -e "$T/state"
+if RELAY_TARGET_MODIFIED=1 "$ROOT_DIR/bin/mb-migrator" relay-doctor source@test \
+  --destination=dest@test --source-root="$T/source" --target-root="$T/target" \
+  --source-identity="$T/source-key" --destination-identity="$T/destination-key" \
+  --source-known-hosts="$T/source-known-hosts" --destination-known-hosts="$T/destination-known-hosts" \
+  --json > "$T/modified-doctor.log"; then
+  echo 'Modified destination unexpectedly passed preflight' >&2; exit 1
+fi
+grep -q 'migration.destination_not_fresh' "$T/modified-doctor.log"
 run_relay() {
   "$ROOT_DIR/bin/mb-migrator" relay source@test --destination=dest@test --source-root="$T/source" \
-    --target-root="$T/target" --state-dir="$T/state" --db-import=no --mu-plugins=skip --root-extras=skip --yes
+    --target-root="$T/target" --state-dir="$T/state" \
+    --source-identity="$T/source-key" --destination-identity="$T/destination-key" \
+    --source-known-hosts="$T/source-known-hosts" --destination-known-hosts="$T/destination-known-hosts" \
+    --db-import=no --mu-plugins=skip --root-extras=skip --yes
 }
 run_relay > "$T/first.log"
 [[ "$(cat "$T/target/wp-content/uploads/test.txt")" == first ]]

@@ -11,6 +11,7 @@ Intermediary migration (run on a machine that can SSH to both hosts):
     --source-root=/sites/example --target-root=/srv/htdocs [options]
   --source-port=22 --destination-port=22
   --source-identity=PATH --destination-identity=PATH
+  --source-known-hosts=PATH --destination-known-hosts=PATH
   --source-db-method=auto|wp-cli|native
   --state-dir=PATH           Private local cache, reused on subsequent catch-ups
 Restore options, including --db-import, --new-url, --safety and --yes, are
@@ -22,7 +23,7 @@ EOF
 if [[ "${1:-}" == --help || $# -eq 0 ]]; then usage; exit 0; fi
 source_host="$1"; shift
 destination=""; source_root=""; target_root=""; source_port=22; destination_port=22
-source_identity=""; destination_identity=""; method=auto
+source_identity=""; destination_identity=""; source_known_hosts=""; destination_known_hosts=""; method=auto
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/mb-migrator/relay"
 restore_args=()
 while [[ $# -gt 0 ]]; do
@@ -34,6 +35,8 @@ while [[ $# -gt 0 ]]; do
     --destination-port=*) destination_port="${1#*=}" ;;
     --source-identity=*) source_identity="${1#*=}" ;;
     --destination-identity=*) destination_identity="${1#*=}" ;;
+    --source-known-hosts=*) source_known_hosts="${1#*=}" ;;
+    --destination-known-hosts=*) destination_known_hosts="${1#*=}" ;;
     --source-db-method=*) method="${1#*=}" ;;
     --state-dir=*) state_dir="${1#*=}" ;;
     --cleanup=*|--delete-stage-after-success|--delete-archive-after-success|--delete-sql-after-import)
@@ -53,11 +56,16 @@ for port in "$source_port" "$destination_port"; do
   [[ "$port" =~ ^[0-9]+$ && "$port" -gt 0 && "$port" -le 65535 ]] || die "Invalid SSH port"
 done
 case "$method" in auto|wp-cli|native) ;; *) die "Invalid source database method" ;; esac
+for path in "$source_identity" "$destination_identity" "$source_known_hosts" "$destination_known_hosts"; do
+  [[ -z "$path" || ( -f "$path" && ! -L "$path" ) ]] || die "A required SSH identity or known-hosts file is unavailable"
+done
 need_cmd ssh; need_cmd rsync; need_cmd tar
 source_ssh=(-p "$source_port" -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=8)
 dest_ssh=(-p "$destination_port" -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=8)
 [[ -z "$source_identity" ]] || source_ssh+=(-i "$source_identity" -o IdentitiesOnly=yes -o IdentityAgent=none)
 [[ -z "$destination_identity" ]] || dest_ssh+=(-i "$destination_identity" -o IdentitiesOnly=yes -o IdentityAgent=none)
+[[ -z "$source_known_hosts" ]] || source_ssh+=(-o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$source_known_hosts")
+[[ -z "$destination_known_hosts" ]] || dest_ssh+=(-o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$destination_known_hosts")
 if command -v sha256sum >/dev/null 2>&1; then hash=(sha256sum); else hash=(shasum -a 256); fi
 id="$(printf '%s' "$source_host|$source_port|$source_root|$destination|$destination_port|$target_root" | "${hash[@]}" | cut -c1-20)"
 mkdir -p "$state_dir"; state_dir="$(cd "$state_dir" && pwd -P)"

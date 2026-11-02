@@ -2,6 +2,8 @@
 
 `mb-migrator` restores WordPress provider exports into a MightyBox-style WordPress document root.
 
+Print the exact tool version with `mb-migrator --version`.
+
 It is built for migration work where a single provider export archive contains site files plus split SQL database dumps. The first supported provider adapter is GridPane-style SFTP exports. The project is intentionally modular so support for other providers can be added behind provider adapters.
 
 It can also pull a single-site WordPress installation directly from a legacy MightyBox host over SSH. The live workflow is controlled entirely from the new host; the legacy host does not need a copy of this repository.
@@ -814,6 +816,30 @@ When the hosts cannot connect to each other, run this on a workstation that can
 SSH to both. Set up trusted SSH host keys through normal SSH first. Both servers
 and the intermediary need rsync. SSH uses local keys or your existing agent; it
 does not copy private keys or agent access to either host.
+
+Run the non-mutating compatibility preflight before transferring content. App
+orchestrators should pass dedicated known-hosts files and consume the single JSON
+result instead of parsing terminal prose:
+
+```bash
+mb-migrator relay-doctor user@source.example.com \
+  --destination=user@destination.example.com \
+  --source-root=/sites/example \
+  --target-root=/srv/htdocs \
+  --source-identity=/private/source-key \
+  --destination-identity=/private/destination-key \
+  --source-known-hosts=/private/source-known-hosts \
+  --destination-known-hosts=/private/destination-known-hosts \
+  --json
+```
+
+The preflight checks SSH access, source WordPress/database export capability,
+multisite exclusion, destination root/tool/write readiness and destination free
+space. It also requires a conservative new-install destination baseline: no
+uploaded files, no additional users, and no more than the standard sample and
+privacy content. A modified destination is blocked instead of merged. The
+preflight does not collect files, export the database or mutate either site.
+Use the same identity and known-hosts options for the subsequent `relay` run.
 
 ```bash
 mb-migrator relay user@source.example.com \

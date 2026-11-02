@@ -2,9 +2,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 export MB_MIGRATOR_PROG_NAME="mb-migrator"
 
 case "${1:-}" in
+  --version|-V)
+    printf 'mb-migrator %s\n' "$(<"$ROOT_DIR/VERSION")"
+    exit 0
+    ;;
   --help|-h|'')
     "$SCRIPT_DIR/mb-live-migrate" --help
     printf '\n'
@@ -19,6 +24,10 @@ case "${1:-}" in
   relay)
     shift
     exec "$SCRIPT_DIR/mb-relay-migrate" "$@"
+    ;;
+  relay-doctor)
+    shift
+    exec "$SCRIPT_DIR/mb-relay-doctor" "$@"
     ;;
   safety|rollback)
     exec "$SCRIPT_DIR/mb-migration-state" "$@"
